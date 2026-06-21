@@ -74,7 +74,6 @@ else
   nok "Runner must be executable (chmod +x $RUNNER)"
 fi
 
-# Capture shebang line for the static parser.
 first_line=$(head -n 1 "$RUNNER")
 if [[ "$first_line" == "#!/usr/bin/env bash" || "$first_line" == "#!/usr/bin/env bash "* || "$first_line" == "#!/bin/bash"* ]]; then
   ok "Runner has a Bash shebang (got: $first_line)"
@@ -182,7 +181,7 @@ fi
 
 section "Acceptance: runs agy --non-interactive and captures output"
 
-check_grep -- '--non-interactive' \
+check_grep '--non-interactive' \
   "Passes --non-interactive to agy" \
   "Runner must pass --non-interactive to agy"
 

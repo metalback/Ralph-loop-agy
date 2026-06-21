@@ -73,8 +73,6 @@ require_cmd() {
 # TEST_CMD extraction
 # ---------------------------------------------------------------------------
 
-# Detect a test command from common project files when the PRD does not
-# declare TEST_CMD explicitly. Returns empty string if no hint is found.
 detect_test_cmd_from_stack() {
   if [[ -f package.json ]] && command -v jq >/dev/null 2>&1; then
     local script
@@ -115,7 +113,6 @@ extract_test_cmd_from_prd() {
   if [[ ! -f "$prd" ]]; then
     return 1
   fi
-  # Single-line form: TEST_CMD: <command>
   local cmd
   cmd=$(grep -E '^TEST_CMD[[:space:]]*:' "$prd" \
         | head -n1 \
@@ -307,19 +304,19 @@ main() {
         if commit_iteration "$iter" "agent solved task (TEST_CMD exit 0)"; then
           success=1
         fi
-        rm -f "$agy_log" "$test_log" 2>/dev/null || true
+        rm -f "$agy_log" "$test_log"
         break
       fi
 
       log "TEST_CMD failed (exit ${test_status}); appending to progress.log"
       append_progress "$iter" "$test_cmd" "$test_status" "$test_log"
-      rm -f "$test_log" 2>/dev/null || true
+      rm -f "$test_log"
     else
       log "agy produced no code changes; appending to progress.log"
       append_no_progress "$iter"
     fi
 
-    rm -f "$agy_log" 2>/dev/null || true
+    rm -f "$agy_log"
 
     if [[ $iter -lt MAX_ITERATIONS ]]; then
       log "cooldown ${COOLDOWN_SECONDS}s before next iteration"
