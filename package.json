@@ -9,7 +9,8 @@
     "test:smoke": "bash .sandcastle/smoke-test.sh",
     "test:skill": "bash .sandcastle/skill-test.sh",
     "test:runner": "bash .sandcastle/runner-test.sh",
-    "test": "npm run test:smoke && npm run test:skill && npm run test:runner"
+    "test:e2e": "bash .sandcastle/e2e-test.sh",
+    "test": "npm run test:smoke && npm run test:skill && npm run test:runner && npm run test:e2e"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "latest",

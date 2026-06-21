@@ -1,0 +1,10 @@
+{
+  "name": "sample-bug-project",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture project with a real bug for the ralph-loop-agy E2E test",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
