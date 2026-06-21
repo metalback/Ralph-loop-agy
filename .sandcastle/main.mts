@@ -1,34 +1,11 @@
-// Parallel Planner with Review — four-phase orchestration loop
-//
-// This template drives a multi-phase workflow:
-//   Phase 1 (Plan):             An agent analyzes open issues, builds a
-//                               dependency graph, and outputs a <plan> JSON
-//                               listing unblocked issues with branch names.
-//   Phase 2 (Execute + Review): For each issue, a sandbox is created via
-//                               createSandbox(). The implementer runs first
-//                               (100 iterations). If it produces commits, a
-//                               reviewer runs in the same sandbox on the same
-//                               branch (1 iteration). All issue pipelines run
-//                               concurrently via Promise.allSettled().
-//   Phase 3 (Merge):            A single agent merges all completed branches
-//                               into the current branch.
-//
-// The outer loop repeats up to MAX_ITERATIONS times so that newly unblocked
-// issues are picked up after each round of merges.
-//
-// Usage:
-//   npx tsx .sandcastle/main.mts
-// Or add to package.json:
-//   "scripts": { "sandcastle": "npx tsx .sandcastle/main.mts" }
+// Four-phase orchestration loop: Plan → Execute+Review → Merge.
+// Repeats up to MAX_ITERATIONS so newly unblocked issues are picked up
+// after each round of merges.
+// Usage: npx tsx .sandcastle/main.mts
 
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-// Maximum number of plan→execute→merge cycles before stopping.
 const MAX_ITERATIONS = 10;
 
 // Agent model. Swap to deepseek-v4-pro for harder tasks, minimax-m3 for
@@ -39,10 +16,6 @@ const AGENT_MODEL = "opencode-go/minimax-m3";
 const hooks = {
   sandbox: { onSandboxReady: [{ command: "npm install" }] },
 };
-
-// ---------------------------------------------------------------------------
-// Main loop
-// ---------------------------------------------------------------------------
 
 for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
@@ -98,7 +71,6 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       });
 
       try {
-        // Run the implementer
         const implement = await sandbox.run({
           name: "implementer",
           maxIterations: 100,
@@ -112,7 +84,6 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
           },
         });
 
-        // Only review if the implementer produced commits
         if (implement.commits.length > 0) {
           const review = await sandbox.run({
             name: "reviewer",
@@ -138,7 +109,6 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     }),
   );
 
-  // Log any agents that threw (network error, sandbox crash, etc.).
   for (const [i, outcome] of settled.entries()) {
     if (outcome.status === "rejected") {
       console.error(
@@ -147,7 +117,6 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     }
   }
 
-  // Only pass branches that actually produced commits to the merge phase.
   const completedIssues = settled
     .map((outcome, i) => ({ outcome, issue: issues[i]! }))
     .filter(
