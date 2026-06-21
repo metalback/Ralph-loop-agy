@@ -1,0 +1,15 @@
+{
+  "name": "ralph-loop-agy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Implementación del bucle Ralph con Google ADK TUI",
+  "type": "module",
+  "scripts": {
+    "sandcastle": "npx tsx .sandcastle/main.mts"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "latest",
+    "typescript": "^5.7",
+    "tsx": "^4.19"
+  }
+}
