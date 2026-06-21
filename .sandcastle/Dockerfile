@@ -5,7 +5,7 @@
 # previous bookworm + opencode-ai image).
 #
 # Build:
-#   docker build -t ralph-loop-base .sandcastle/Dockerfile
+#   docker build -t ralph-loop-base -f .sandcastle/Dockerfile .
 #   # or via sandcastle:
 #   sandcastle docker build-image
 #
@@ -22,14 +22,13 @@ ARG AGENT_GID=1000
 # System packages. github-cli comes from the Alpine community repo, so we
 # append it to the repositories list before running apk.
 RUN set -eux \
-  && echo "https://dl-cdn.alpinelinux.org/alpine/v$(cat /etc/alpine-release | cut -d. -f1-2)/community" >> /etc/apk/repositories \
+  && echo "https://dl-cdn.alpinelinux.org/alpine/v$(cut -d. -f1-2 /etc/alpine-release)/community" >> /etc/apk/repositories \
   && apk add --no-cache \
        bash \
        curl \
        git \
        github-cli \
-       jq \
-  && rm -rf /var/cache/apk/*
+       jq
 
 # agy v1.0.8 — the agent engine for the Ralph Loop.
 RUN npm install -g agy@1.0.8 \

@@ -38,6 +38,18 @@ section() {
   printf '\n\033[1m== %s ==\033[0m\n' "$1"
 }
 
+check_grep() {
+  local pattern="$1"
+  local ok_msg="$2"
+  local nok_msg="$3"
+  local detail="${4:-}"
+  if grep -Eq "$pattern" <<<"$dockerfile_content"; then
+    ok "$ok_msg"
+  else
+    nok "$nok_msg" "$detail"
+  fi
+}
+
 if [[ ! -f "$DOCKERFILE" ]]; then
   echo "Dockerfile not found at: $DOCKERFILE" >&2
   exit 1
@@ -51,67 +63,28 @@ section "Static checks ($DOCKERFILE)"
 
 dockerfile_content=$(cat "$DOCKERFILE")
 
-# Base image must be node:22-alpine (acceptance criterion: based on node:22-alpine)
-if grep -Eq '^FROM[[:space:]]+node:22-alpine(\s|$)' <<<"$dockerfile_content"; then
-  ok "Base image is node:22-alpine"
-else
-  nok "Base image must be node:22-alpine" \
-    "current FROM line: $(grep -E '^FROM' <<<"$dockerfile_content" | head -1)"
-fi
+check_grep '^FROM[[:space:]]+node:22-alpine(\s|$)' \
+  "Base image is node:22-alpine" \
+  "Base image must be node:22-alpine" \
+  "current FROM line: $(grep -E '^FROM' <<<"$dockerfile_content" | head -1)"
 
-# agy v1.0.8 must be installed (npm global)
-if grep -Eq "npm[[:space:]]+install[[:space:]]+-g[[:space:]]+agy@${AGY_VERSION}" <<<"$dockerfile_content"; then
-  ok "agy v${AGY_VERSION} installed globally via npm"
-else
-  nok "agy v${AGY_VERSION} must be installed globally (npm install -g agy@${AGY_VERSION})"
-fi
+check_grep "npm[[:space:]]+install[[:space:]]+-g[[:space:]]+agy@${AGY_VERSION}" \
+  "agy v${AGY_VERSION} installed globally via npm" \
+  "agy v${AGY_VERSION} must be installed globally (npm install -g agy@${AGY_VERSION})"
 
-# gh CLI must be installed
-if grep -Eq '\bgh\b' <<<"$dockerfile_content"; then
-  ok "gh CLI installed"
-else
-  nok "gh CLI must be installed"
-fi
+check_grep '\bgh\b' "gh CLI installed" "gh CLI must be installed"
+check_grep '\bgit\b' "git installed" "git must be installed"
+check_grep '\bjq\b' "jq installed" "jq must be installed"
 
-# git must be installed
-if grep -Eq '\bgit\b' <<<"$dockerfile_content"; then
-  ok "git installed"
-else
-  nok "git must be installed"
-fi
+check_grep '^ARG[[:space:]]+AGENT_UID=' "ARG AGENT_UID declared" "ARG AGENT_UID must be declared"
+check_grep '^ARG[[:space:]]+AGENT_GID=' "ARG AGENT_GID declared" "ARG AGENT_GID must be declared"
 
-# jq must be installed
-if grep -Eq '\bjq\b' <<<"$dockerfile_content"; then
-  ok "jq installed"
+# USER agent (or dynamic ${AGENT_UID}:${AGENT_GID}) ensures UID/GID from build args
+if grep -Eq '^USER[[:space:]]+agent' <<<"$dockerfile_content" \
+   || grep -Eq '^USER[[:space:]]+(\$\{|")[a-zA-Z_]+(:\$\{[a-zA-Z_]+\})?' <<<"$dockerfile_content"; then
+  ok "USER is agent (dynamic UID/GID via build args)"
 else
-  nok "jq must be installed"
-fi
-
-# AGENT_UID and AGENT_GID build args must be declared
-if grep -Eq '^ARG[[:space:]]+AGENT_UID=' <<<"$dockerfile_content"; then
-  ok "ARG AGENT_UID declared"
-else
-  nok "ARG AGENT_UID must be declared"
-fi
-if grep -Eq '^ARG[[:space:]]+AGENT_GID=' <<<"$dockerfile_content"; then
-  ok "ARG AGENT_GID declared"
-else
-  nok "ARG AGENT_GID must be declared"
-fi
-
-# USER agent must be set (use of ${AGENT_UID}:${AGENT_GID} counts)
-if grep -Eq '^USER[[:space:]]+agent' <<<"$dockerfile_content"; then
-  ok "USER agent configured"
-else
-  nok "USER agent must be set"
-fi
-
-# UID/GID must be applied at runtime via USER, not just hard-coded
-if grep -Eq '^USER[[:space:]]+(\$\{|")[a-zA-Z_]+(:\$\{[a-zA-Z_]+\})?' <<<"$dockerfile_content" \
-   || grep -Eq '^USER[[:space:]]+agent' <<<"$dockerfile_content"; then
-  ok "USER honours dynamic AGENT_UID/AGENT_GID"
-else
-  nok "USER must use dynamic UID/GID from build args"
+  nok "USER must be set to agent user with dynamic UID/GID from build args"
 fi
 
 # ---------------------------------------------------------------------------
