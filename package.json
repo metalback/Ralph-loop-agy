@@ -8,7 +8,8 @@
     "sandcastle": "npx tsx .sandcastle/main.mts",
     "test:smoke": "bash .sandcastle/smoke-test.sh",
     "test:skill": "bash .sandcastle/skill-test.sh",
-    "test": "npm run test:smoke && npm run test:skill"
+    "test:runner": "bash .sandcastle/runner-test.sh",
+    "test": "npm run test:smoke && npm run test:skill && npm run test:runner"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "latest",
