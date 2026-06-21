@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
-# ralph_runner.sh — Ralph Loop orchestrator (issue #4 / PRD #1).
+# ralph_runner.sh — Ralph Loop orchestrator (issue #4 / PRD #1, S4 #5).
 #
 # Drives the Ralph Loop end-to-end:
 #   1. Reads PRD.md, extracts TEST_CMD (with a stack-detection fallback).
-#   2. Ensures the ralph-loop-base Docker image exists (builds it from
+#   2. Detects the git context: the base branch (BASE_BRANCH) and the
+#      issue id/slug from the current branch name (sandcastle/issue-N-slug).
+#   3. Ensures the ralph-loop-base Docker image exists (builds it from
 #      .sandcastle/Dockerfile if not).
-#   3. Iteratively runs `agy --non-interactive --load-skill ralph-worker`
+#   4. Iteratively runs `agy --non-interactive --load-skill ralph-worker`
 #      inside a sandboxed container that mounts the project :rw and the
 #      host agy credentials :ro.
-#   4. After each iteration, runs TEST_CMD. Exit 0 → auto-commit. Non-zero
-#      → append stderr to progress.log (with timestamp), cooldown, retry.
-#   5. Trips a circuit breaker at MAX_ITERATIONS (default 10), preserving
+#   5. After each iteration, runs TEST_CMD. Exit 0 → auto-commit on a
+#      feature branch `ralph/issue-N-slug` (created on first success).
+#      Non-zero → append stderr to progress.log (with timestamp), cooldown,
+#      retry.
+#   6. After the loop succeeds, merges the feature branch into BASE_BRANCH
+#      (with --no-ff for a merge commit). On conflict the merge is aborted
+#      and the runner exits 1.
+#   7. Trips a circuit breaker at MAX_ITERATIONS (default 10), preserving
 #      progress.log and exiting 1.
 #
 # Configuration: every default can be overridden via environment variables
 # or by exporting values from a local .env file in the project root.
+#
+# The script can be sourced by tests to access the git helpers (main() is
+# guarded so it only runs when the file is executed, not sourced).
 
 set -euo pipefail
 
@@ -32,6 +42,14 @@ WORKDIR_IN_CONTAINER="${WORKDIR_IN_CONTAINER:-/workspace}"
 AGY_CREDENTIALS_DIR="${AGY_CREDENTIALS_DIR:-$HOME/.config/antigravity-cli}"
 AGY_CREDENTIALS_IN_CONTAINER="${AGY_CREDENTIALS_IN_CONTAINER:-/home/agent/.config/antigravity-cli}"
 SKILL_NAME="${SKILL_NAME:-ralph-worker}"
+
+# Issue / branch context. Overridable via env; otherwise auto-detected
+# from the current branch name in detect_git_context().
+ISSUE_ID="${ISSUE_ID:-}"
+ISSUE_SLUG="${ISSUE_SLUG:-}"
+BASE_BRANCH="${BASE_BRANCH:-}"
+FEATURE_BRANCH="${FEATURE_BRANCH:-}"
+BASELINE_COMMIT="${BASELINE_COMMIT:-}"
 
 # Source .env (do not override already-set environment).
 if [[ -f .env ]]; then
@@ -158,15 +176,93 @@ ensure_docker_image() {
 # Git helpers
 # ---------------------------------------------------------------------------
 
+# Returns the current branch name (or 'HEAD' if detached).
+current_branch() {
+  git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD"
+}
+
+# Parse the issue id and slug from a sandcastle-style branch name:
+#   sandcastle/issue-42-some-task-slug  ->  ISSUE_ID=42, ISSUE_SLUG=some-task-slug
+# Returns 0 on a successful parse, 1 otherwise. Mutates ISSUE_ID and
+# ISSUE_SLUG in the caller's environment.
+parse_issue_from_branch() {
+  local branch="$1"
+  if [[ "$branch" =~ ^sandcastle/issue-([0-9]+)-(.+)$ ]]; then
+    ISSUE_ID="${BASH_REMATCH[1]}"
+    ISSUE_SLUG="${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+# Build the feature branch name from ISSUE_ID and ISSUE_SLUG. The result
+# is echoed; callers should capture it (e.g. into FEATURE_BRANCH).
+build_feature_branch() {
+  if [[ -n "${ISSUE_ID:-}" && -n "${ISSUE_SLUG:-}" ]]; then
+    printf 'ralph/issue-%s-%s\n' "$ISSUE_ID" "$ISSUE_SLUG"
+  elif [[ -n "${ISSUE_ID:-}" ]]; then
+    printf 'ralph/issue-%s\n' "$ISSUE_ID"
+  else
+    printf 'ralph/auto\n'
+  fi
+}
+
+# Detect BASE_BRANCH, ISSUE_ID, ISSUE_SLUG and FEATURE_BRANCH from the
+# current branch. Called once at the start of the loop.
+detect_git_context() {
+  require_cmd git
+  local branch
+  branch=$(current_branch)
+  if [[ -z "${BASE_BRANCH:-}" ]]; then
+    BASE_BRANCH="$branch"
+  fi
+  if [[ -z "${ISSUE_ID:-}" || -z "${ISSUE_SLUG:-}" ]]; then
+    parse_issue_from_branch "$branch" || true
+  fi
+  FEATURE_BRANCH=""
+  log "git context: BASE_BRANCH=${BASE_BRANCH} ISSUE_ID=${ISSUE_ID:-?} slug=${ISSUE_SLUG:-?}"
+}
+
+# Record the current HEAD as the baseline. Any tracked/untracked changes
+# observed at commit time are by definition agy-produced.
+record_baseline() {
+  if ! BASELINE_COMMIT=$(git rev-parse HEAD 2>/dev/null); then
+    die "no git commit found; please commit current state before running the loop"
+  fi
+  log "baseline commit recorded: $BASELINE_COMMIT"
+}
+
 has_uncommitted_changes() {
   ! git diff --quiet HEAD 2>/dev/null \
     || ! git diff --cached --quiet 2>/dev/null \
     || [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null || true)" ]]
 }
 
-# Stage everything except the progress.log so it never lands in a commit.
+# Stage only files that have changed since BASELINE_COMMIT, excluding
+# progress.log. This implements the S4 acceptance bullet "only commit
+# files modified by agy": the baseline is the working tree state at the
+# start of the loop, so anything that differs is by definition agent work.
 stage_changes() {
-  git add -A -- ':!progress.log' || true
+  if [[ -z "${BASELINE_COMMIT:-}" ]]; then
+    record_baseline
+  fi
+  # Modified/added/renamed/copied tracked files since the baseline.
+  local tracked
+  tracked=$(git diff --name-only --diff-filter=ACMRT "$BASELINE_COMMIT" 2>/dev/null || true)
+  # New (untracked) files that respect .gitignore.
+  local untracked
+  untracked=$(git ls-files --others --exclude-standard 2>/dev/null || true)
+  local added=0
+  local f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    [[ "$f" == "progress.log" ]] && continue
+    if [[ -e "$f" ]]; then
+      git add -- "$f" 2>/dev/null && added=$((added + 1))
+    fi
+  done <<<"${tracked}
+${untracked}"
+  log "staged ${added} file(s) for commit (baseline=${BASELINE_COMMIT:0:7}, excluded: progress.log)"
 }
 
 commit_iteration() {
@@ -178,8 +274,87 @@ commit_iteration() {
     return 1
   fi
   local msg="RALPH: iteration ${iter} — ${summary}"
-  log "committing: $msg"
+  log "committing on ${FEATURE_BRANCH:-$(current_branch)}: $msg"
   git commit -m "$msg"
+}
+
+# Create the feature branch ralph/issue-N-slug from the current commit
+# and switch to it. No-op if FEATURE_BRANCH already exists and is checked
+# out (idempotent across multiple invocations of the same loop).
+create_feature_branch() {
+  if [[ -z "${FEATURE_BRANCH:-}" ]]; then
+    FEATURE_BRANCH=$(build_feature_branch)
+  fi
+  if [[ "$(current_branch)" == "$FEATURE_BRANCH" ]]; then
+    log "already on feature branch $FEATURE_BRANCH"
+    return 0
+  fi
+  if git show-ref --verify --quiet "refs/heads/${FEATURE_BRANCH}"; then
+    log "feature branch $FEATURE_BRANCH already exists, switching to it"
+    git checkout "$FEATURE_BRANCH"
+    return 0
+  fi
+  log "creating feature branch $FEATURE_BRANCH from $(current_branch)"
+  git checkout -b "$FEATURE_BRANCH"
+}
+
+# Merge the feature branch into BASE_BRANCH. Returns 0 on success, 1 on
+# conflict. On conflict the merge is aborted (via 'git merge --abort') so
+# BASE_BRANCH stays clean and the runner exits 1.
+merge_feature_to_base() {
+  if [[ -z "${FEATURE_BRANCH:-}" || -z "${BASE_BRANCH:-}" ]]; then
+    err "merge_feature_to_base: FEATURE_BRANCH and BASE_BRANCH must be set"
+    return 1
+  fi
+  log "merging ${FEATURE_BRANCH} into ${BASE_BRANCH}"
+
+  # Stash any uncommitted work in the working tree so the checkout is clean.
+  local stashed=0
+  if has_uncommitted_changes; then
+    log "stashing uncommitted changes before merge"
+    git stash push -u -m "ralph pre-merge $(now_utc)" || {
+      err "failed to stash uncommitted changes before merge"
+      return 1
+    }
+    stashed=1
+  fi
+
+  # Switch to the base branch.
+  if ! git checkout "$BASE_BRANCH" 2>/dev/null; then
+    err "failed to checkout base branch $BASE_BRANCH"
+    [[ $stashed -eq 1 ]] && git stash pop >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  # Attempt the merge. --no-ff keeps a merge commit so the history shows
+  # the integration step (even when fast-forward would be possible).
+  local merge_log
+  merge_log=$(mktemp)
+  if git merge --no-ff "$FEATURE_BRANCH" \
+        -m "RALPH: merge ${FEATURE_BRANCH} into ${BASE_BRANCH}" \
+        >"$merge_log" 2>&1; then
+    log "merge ${FEATURE_BRANCH} -> ${BASE_BRANCH} successful"
+    rm -f "$merge_log"
+    return 0
+  fi
+
+  # Conflict path.
+  err "merge conflict: ${FEATURE_BRANCH} -> ${BASE_BRANCH}"
+  err "merge output (truncated):"
+  tail -n 20 "$merge_log" | sed 's/^/  /' >&2 || true
+  err "aborting merge to keep ${BASE_BRANCH} clean"
+  git merge --abort >/dev/null 2>&1 || true
+  rm -f "$merge_log"
+
+  # Try to restore the user's stashed work, but never fail the loop
+  # because of it — they can re-apply manually.
+  if [[ $stashed -eq 1 ]]; then
+    err "restoring stashed changes onto ${BASE_BRANCH}"
+    if ! git stash pop >/dev/null 2>&1; then
+      err "warning: failed to restore stash; manual intervention needed"
+    fi
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -271,6 +446,9 @@ main() {
 
   [[ -f "$PRD_FILE" ]] || die "PRD file not found: $PRD_FILE"
 
+  detect_git_context
+  record_baseline
+
   local test_cmd
   test_cmd=$(resolve_test_cmd "$PRD_FILE")
   log "TEST_CMD resolved to: $test_cmd"
@@ -301,6 +479,11 @@ main() {
 
       if [[ $test_status -eq 0 ]]; then
         log "TEST_CMD passed (exit 0)"
+        # First success: create the feature branch so all subsequent
+        # iteration commits land on ralph/issue-N-slug.
+        if [[ -z "${FEATURE_BRANCH:-}" ]]; then
+          create_feature_branch || die "failed to create feature branch"
+        fi
         if commit_iteration "$iter" "agent solved task (TEST_CMD exit 0)"; then
           success=1
         fi
@@ -326,6 +509,14 @@ main() {
 
   if [[ $success -eq 1 ]]; then
     log "Ralph Loop completed successfully in ${iter} iteration(s)"
+    # Integrate the feature branch into BASE_BRANCH. A merge conflict
+    # aborts the merge and exits 1, so a failed merge never leaves the
+    # base branch in a half-merged state.
+    if ! merge_feature_to_base; then
+      err "merge into ${BASE_BRANCH} failed; feature branch ${FEATURE_BRANCH} preserved"
+      exit 1
+    fi
+    log "feature branch ${FEATURE_BRANCH} merged into ${BASE_BRANCH}"
     exit 0
   fi
 
@@ -334,4 +525,10 @@ main() {
   exit 1
 }
 
-main "$@"
+# Only run main() when the file is executed, not when sourced for tests.
+# This lets the test suite import the git helpers (parse_issue_from_branch,
+# build_feature_branch, create_feature_branch, commit_iteration,
+# merge_feature_to_base, ...) without triggering the full loop.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

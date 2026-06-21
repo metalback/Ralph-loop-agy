@@ -382,6 +382,273 @@ fi
 rm -f "$tmp_prd"
 
 # ---------------------------------------------------------------------------
+# Acceptance criteria from issue #5 (S4: Git automation).
+# ---------------------------------------------------------------------------
+
+section "S4 acceptance: feature branch named ralph/issue-{id}-{slug}"
+
+# The runner must construct branch names of the form ralph/issue-N-slug.
+if grep -Eq 'ralph/issue-' <<<"$runner_content"; then
+  ok "Runner builds feature branches in the 'ralph/issue-N-slug' form"
+else
+  nok "Runner must build feature branches in the 'ralph/issue-N-slug' form" \
+      "expected a 'ralph/issue-' token in the runner source"
+fi
+
+# The slug must be derived from somewhere (current branch, PRD, env). We
+# only check that the runner parses a numeric issue id from a branch
+# name (the sandcastle convention) or accepts it from the environment.
+if grep -Eq 'issue-\\\$\{|issue-\\\$|sandcastle/issue-|ISSUE_ID' <<<"$runner_content"; then
+  ok "Runner sources the issue id (from the branch name or ISSUE_ID env)"
+else
+  nok "Runner must source the issue id from the branch name or ISSUE_ID env"
+fi
+
+section "S4 acceptance: commit uses RALPH: prefix"
+
+# The existing commit message format must still be 'RALPH: ...'.
+if grep -Eq 'RALPH:[[:space:]]*iteration' <<<"$runner_content"; then
+  ok "Commit message still uses 'RALPH: iteration N — ...' prefix"
+else
+  nok "Runner must keep the 'RALPH: iteration N — ...' commit prefix"
+fi
+
+section "S4 acceptance: merge to base branch at end of loop"
+
+# The runner must call git merge at the end of the loop.
+if grep -Eq 'git[[:space:]]+merge' <<<"$runner_content"; then
+  ok "Runner invokes 'git merge' to integrate the feature branch"
+else
+  nok "Runner must call 'git merge' to integrate the feature branch into BASE_BRANCH"
+fi
+
+# A merge commit is desirable for traceability (--no-ff) but not required.
+if grep -Eq -- '--no-ff|merge[[:space:]]+--no' <<<"$runner_content"; then
+  ok "Runner uses 'git merge --no-ff' for a merge commit"
+else
+  echo "  (info) Runner does not use --no-ff; default fast-forward is fine for simple cases"
+fi
+
+# BASE_BRANCH must be configurable.
+if grep -Eq 'BASE_BRANCH' <<<"$runner_content"; then
+  ok "Runner exposes BASE_BRANCH (configurable base branch)"
+else
+  nok "Runner must reference BASE_BRANCH (or auto-detect the base branch)"
+fi
+
+section "S4 acceptance: abort on merge conflict"
+
+# The runner must abort a failed merge and report the conflict.
+if grep -Eq 'merge[[:space:]]+--abort|git[[:space:]]+merge[[:space:]]+--abort' <<<"$runner_content"; then
+  ok "Runner aborts the merge on conflict ('git merge --abort')"
+else
+  nok "Runner must call 'git merge --abort' on conflict"
+fi
+
+# The runner must report the conflict to the user (stderr, error message).
+if grep -Eqi 'conflict' <<<"$runner_content"; then
+  ok "Runner mentions 'conflict' in the source (error message expected)"
+else
+  nok "Runner must report a 'conflict' message when the merge fails"
+fi
+
+section "S4 acceptance: commit only files modified by agy"
+
+# The runner must track a baseline (the commit/working tree state at the
+# start of the loop) and stage only files that changed since.
+if grep -Eq 'BASELINE|baseline|rev-parse[[:space:]]+HEAD' <<<"$runner_content"; then
+  ok "Runner records a baseline (git rev-parse HEAD) at loop start"
+else
+  nok "Runner must record a baseline (git rev-parse HEAD) to scope commits to agy changes"
+fi
+
+# The runner must NOT just `git add -A` (which would include files
+# unrelated to the task). It should use `git add` with explicit paths.
+if grep -Eq -- "git[[:space:]]+add[[:space:]]+-A[[:space:]]+--" <<<"$runner_content"; then
+  nok "Runner still uses 'git add -A' (may commit unrelated files)" \
+      "prefer staging only files changed since the baseline"
+else
+  ok "Runner does not blanket-stage with 'git add -A'"
+fi
+
+# progress.log is still excluded from the commit.
+if grep -Eq ':!progress\.log|progress\.log' <<<"$runner_content"; then
+  ok "Runner continues to exclude progress.log from the commit"
+else
+  nok "Runner must exclude progress.log from the commit"
+fi
+
+# ---------------------------------------------------------------------------
+# Functional check: source the runner and call its git helpers against
+# a scratch git repo. This is the dynamic contract for S4: we can detect
+# the issue id from the branch, build the right feature branch name, and
+# perform a clean merge to the base.
+# ---------------------------------------------------------------------------
+
+section "Functional: source runner and exercise git helpers"
+
+# Use a scratch dir so we never touch the user's working tree.
+scratch_dir=$(mktemp -d)
+trap 'rm -rf "$scratch_dir"' EXIT
+
+# Bootstrap a tiny repo with a sandcastle-style branch and a base branch.
+(
+  set -e
+  cd "$scratch_dir"
+  git init -q -b main
+  git config user.email "ralph@test.local"
+  git config user.name  "ralph-test"
+  printf 'base\n' >README.md
+  git add README.md
+  git commit -q -m "initial"
+  git checkout -q -b "sandcastle/issue-42-some-task-slug"
+  printf 'worktree\n' >work.txt
+) >/dev/null 2>&1
+
+# Source the runner; the main guard must let us import the helpers
+# without executing the loop.
+# shellcheck disable=SC1091
+source "$RUNNER" --help </dev/null >/dev/null 2>&1 || true
+
+# 1) parse_issue_from_branch returns the numeric id and slug.
+if declare -f parse_issue_from_branch >/dev/null 2>&1; then
+  if parse_issue_from_branch "sandcastle/issue-42-some-task-slug"; then
+    if [[ "${ISSUE_ID:-}" == "42" && "${ISSUE_SLUG:-}" == "some-task-slug" ]]; then
+      ok "parse_issue_from_branch extracts ISSUE_ID=42 and slug from branch"
+    else
+      nok "parse_issue_from_branch sets wrong env" \
+          "got ISSUE_ID='${ISSUE_ID:-}' slug='${ISSUE_SLUG:-}'"
+    fi
+  else
+    nok "parse_issue_from_branch should succeed for sandcastle/issue-N-slug branches"
+  fi
+else
+  nok "Runner must expose a parse_issue_from_branch function" \
+      "add 'parse_issue_from_branch() { ... }' to $RUNNER"
+fi
+
+# 2) build_feature_branch returns 'ralph/issue-N-slug'.
+if declare -f build_feature_branch >/dev/null 2>&1; then
+  ISSUE_ID="7"
+  ISSUE_SLUG="automate-the-thing"
+  built=$(build_feature_branch)
+  if [[ "$built" == "ralph/issue-7-automate-the-thing" ]]; then
+    ok "build_feature_branch returns 'ralph/issue-7-automate-the-thing'"
+  else
+    nok "build_feature_branch returned wrong name" "got: '$built'"
+  fi
+else
+  nok "Runner must expose a build_feature_branch function"
+fi
+
+# 3) End-to-end: scratch repo -> create feature branch -> commit -> merge
+#    to base branch. We invoke the relevant functions directly.
+if declare -f create_feature_branch >/dev/null 2>&1 \
+   && declare -f commit_iteration >/dev/null 2>&1 \
+   && declare -f merge_feature_to_base >/dev/null 2>&1; then
+  (
+    set -e
+    cd "$scratch_dir"
+    BASE_BRANCH="main"
+    ISSUE_ID="42"
+    ISSUE_SLUG="some-task-slug"
+    FEATURE_BRANCH=""
+
+    # create_feature_branch must create 'ralph/issue-42-some-task-slug'.
+    if ! create_feature_branch; then
+      echo "create_feature_branch failed"
+      exit 1
+    fi
+    if [[ "$(git rev-parse --abbrev-ref HEAD)" == "ralph/issue-42-some-task-slug" ]]; then
+      echo "on feature branch"
+    else
+      echo "not on feature branch: $(git rev-parse --abbrev-ref HEAD)"
+      exit 1
+    fi
+    # commit_iteration must commit only the new file (work.txt), not
+    # anything else, with the RALPH: prefix.
+    if ! commit_iteration 1 "test summary"; then
+      echo "commit_iteration failed"
+      exit 1
+    fi
+    last_msg=$(git log -1 --pretty=%s)
+    if [[ "$last_msg" == RALPH:* ]]; then
+      echo "commit has RALPH: prefix: $last_msg"
+    else
+      echo "commit lacks RALPH: prefix: $last_msg"
+      exit 1
+    fi
+    if git diff --name-only "main" | grep -q '^work.txt$'; then
+      echo "work.txt is on the feature branch"
+    else
+      echo "work.txt missing from feature branch"
+      exit 1
+    fi
+    # merge_feature_to_base must switch to BASE_BRANCH and merge.
+    if ! merge_feature_to_base; then
+      echo "merge_feature_to_base failed"
+      exit 1
+    fi
+    if [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]]; then
+      echo "back on main"
+    else
+      echo "not on main after merge: $(git rev-parse --abbrev-ref HEAD)"
+      exit 1
+    fi
+    if git diff --name-only HEAD~1 HEAD | grep -q '^work.txt$'; then
+      echo "work.txt reached main"
+    else
+      echo "work.txt did not reach main"
+      exit 1
+    fi
+  ) >/dev/null 2>&1 && ok "End-to-end: feature branch + commit + merge into base" \
+    || nok "End-to-end git flow (create/commit/merge) failed" "see scratch repo at $scratch_dir"
+else
+  nok "Runner must expose create_feature_branch, commit_iteration, and merge_feature_to_base" \
+      "missing one of: create_feature_branch / commit_iteration / merge_feature_to_base"
+fi
+
+# 4) Merge conflict: diverged base branch and feature branch. The
+#    merge function must abort and report the conflict.
+if declare -f merge_feature_to_base >/dev/null 2>&1; then
+  conflict_dir=$(mktemp -d)
+  (
+    set -e
+    cd "$conflict_dir"
+    git init -q -b main
+    git config user.email "ralph@test.local"
+    git config user.name  "ralph-test"
+    printf 'a\n' >conflict.txt
+    git add conflict.txt
+    git commit -q -m "base"
+    git checkout -q -b "feature"
+    printf 'b\n' >conflict.txt
+    git commit -q -am "feature change"
+    git checkout -q main
+    printf 'c\n' >conflict.txt
+    git commit -q -am "diverging base change"
+    # Set the runner's branch vars so we exercise the merge path, not
+    # the "missing vars" guard.
+    BASE_BRANCH="main"
+    FEATURE_BRANCH="feature"
+    if merge_feature_to_base >/dev/null 2>&1; then
+      echo "merge unexpectedly succeeded"
+      exit 1
+    fi
+    # Verify we're back on a clean main (no merge in progress).
+    if [[ -f .git/MERGE_HEAD ]]; then
+      echo "merge was not aborted"
+      exit 1
+    fi
+  ) >/dev/null 2>&1 && ok "Merge conflict: function aborts and reports failure" \
+    || nok "Merge conflict: function must abort and report failure" \
+           "(see scratch repo at $conflict_dir)"
+  rm -rf "$conflict_dir"
+else
+  nok "Runner must expose merge_feature_to_base to test the conflict path"
+fi
+
+# ---------------------------------------------------------------------------
 # Dynamic check: when docker is available, verify the runner can be
 # inspected without erroring. We do not run a full loop here (it would
 # invoke agy, which requires a real credential); the static checks are
