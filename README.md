@@ -1,113 +1,131 @@
-# Ralph-loop-agy
+# Ralph Loop — Autonomous Engineering Loop with Antigravity CLI (agy)
 
-Hands-off autonomous engineering loop driven by [Antigravity CLI (agy)](https://www.npmjs.com/package/agy)
-and the [Sandcastle](https://github.com/anomalyco/sandcastle) flow. An
-orchestrator (`ralph_runner.sh`) runs `agy` inside a Docker sandbox,
-validates the agent's changes against a `TEST_CMD` declared in `PRD.md`,
-auto-commits successful iterations to a feature branch, and merges back
-to the base branch at the end — with a circuit breaker that preserves
-`progress.log` after `MAX_ITERATIONS` failed attempts.
+[![PRD](https://img.shields.io/badge/PRD-%231-blue)](https://github.com/metalback/Ralph-loop-agy/issues/1)
 
-## Status
+**Ralph Loop** es un bucle autónomo de ingeniería de software. Dado un PRD con una tarea y un comando de validación, el loop itera de forma desatendida hasta que el código pasa los tests o se alcanza el límite de iteraciones.
 
-| Stage | Description | Issue |
-| --- | --- | --- |
-| S1 | Docker sandbox + agy smoke test | #2 |
-| S2 | `ralph-worker.md` skill + manual execution | #3 |
-| S3 | Bash orchestrator + smoke test | #4 |
-| S4 | Git automation (branch + commit + merge) | #5 |
-| S5 | **E2E stress test with a real bug** | #6 |
+Usa [Antigravity CLI (agy)](https://github.com/antigravity-ai/antigravity) con **Google Gemini** como motor agéntico, ejecutándose dentro de un contenedor Docker aislado.
 
-## Repository layout
+---
 
-```
-PRD.md                     # the PRD that drives the loop
-ralph_runner.sh            # the Bash orchestrator
-ralph-worker.md            # the skill loaded by agy
-.sandcastle/               # sandcastle prompts, Dockerfile, test suites
-  Dockerfile
-  smoke-test.sh            # S1 — image acceptance criteria
-  skill-test.sh            # S2 — ralph-worker.md acceptance criteria
-  runner-test.sh           # S3/S4 — orchestrator + git helpers
-  e2e-test.sh              # S5 — end-to-end stress test (issue #6)
-test/fixtures/             # S5 — fixture project used by the E2E test
-  sample-bug-project/      # real Node.js project with a real bug
-  e2e-harness.sh           # driver that exercises the ralph_runner.sh loop
-  agents/
-    mock-agy-resolvable.sh # mock agy that fixes the bug in 1 iteration
-    mock-agy-irresoluble.sh# mock agy that never fixes the bug
-```
+## Requisitos
 
-## How it works
+- **Docker**
+- **Node.js 22+** (para instalar agy si no lo tienes)
+- **agy v1.0.8** autenticado con Google
+- **gh CLI** (opcional, para close automático de issues)
 
-1. `ralph_runner.sh` reads `PRD.md`, extracts `TEST_CMD` (or falls back
-   to a stack-detection heuristic) and `BASE_BRANCH` / `ISSUE_ID` /
-   `ISSUE_SLUG` from the current sandcastle branch.
-2. It records the current commit as a baseline so it can stage only
-   the files `agy` changes.
-3. Each iteration:
-   - Runs `agy --non-interactive --load-skill ralph-worker` inside the
-     `ralph-loop-base` Docker sandbox, with the project mounted `:rw`
-     and the host's agy credentials mounted `:ro`.
-   - If `agy` produced code changes, runs `TEST_CMD` via `bash -c`.
-   - On exit 0: creates the `ralph/issue-N-slug` feature branch (first
-     success only) and commits with the `RALPH:` prefix.
-   - On non-zero exit: appends the iteration to `progress.log`, waits
-     `COOLDOWN_SECONDS`, retries.
-4. After the first success, merges the feature branch into the base
-   branch with `git merge --no-ff` (aborting cleanly on conflict).
-5. After `MAX_ITERATIONS` failures: circuit breaker trips, the
-   orchestrator exits 1, and `progress.log` is left intact for
-   post-mortem.
-
-## Configuration
-
-All defaults are environment-overridable. A local `.env` is auto-sourced
-when present. See `.sandcastle/.env.template` for the full list
-(`MODEL`, `MAX_ITERATIONS`, `COOLDOWN_SECONDS`, `OPENCODE_BASE_URL`,
-`OPENCODE_API_KEY`, `GH_TOKEN`).
-
-## Testing
-
-The project ships with four test suites, all Bash and dependency-free
-besides `bash` and `git` (Docker is only required for the manual
-`agy` invocation in the dynamic checks):
+## Instalación
 
 ```bash
-npm run test:smoke   # S1 — Dockerfile static + dynamic (image build/run)
-npm run test:skill   # S2 — ralph-worker.md skill content
-npm run test:runner  # S3/S4 — ralph_runner.sh static + git helpers
-npm run test:e2e     # S5 — end-to-end stress test (resolvable + circuit-breaker)
-npm test             # runs all four in order
+# 1. Clonar el repo
+git clone git@github.com:metalback/Ralph-loop-agy.git
+cd Ralph-loop-agy
+
+# 2. Autenticar agy (si no lo has hecho)
+agy auth login
+
+# 3. Construir la imagen Docker base
+docker build -t ralph-loop-base -f .sandcastle/Dockerfile .
 ```
 
-The S5 suite (`npm run test:e2e`) is the most thorough: it copies the
-fixture project under `test/fixtures/sample-bug-project/` into a
-scratch git repo, drives the real `ralph_runner.sh` loop (sourcing it
-for the git helpers) using a mock `agy`, and asserts that:
+## Uso
 
-- The fixture has a real bug and a failing test out of the box.
-- A resolvable bug is fixed in ≤ 5 iterations.
-- A `RALPH:` commit is created on a `ralph/issue-N-slug` feature
-  branch and merged back to the base branch.
-- An irresoluble bug trips the circuit breaker after exactly 10
-  iterations.
-- `progress.log` accumulates one timestamped entry per failed
-  attempt.
-- The agy credentials path is mounted `:ro` (a live bind mount blocks
-  writes; the test falls back to a `chmod 444` file when it cannot
-  mount).
+### Preparar una tarea
 
-### S5 fixture project
+Crea o edita `PRD.md` en la raíz del proyecto. Debe incluir:
 
-`test/fixtures/sample-bug-project/` is a tiny CommonJS Node project
-with a real bug: `multiply(a, b)` in `src/calc.js` returns `a + b`
-instead of `a * b`. `PRD.md` declares the task and the `TEST_CMD`
-(`npm test`); the two mock agents under `test/fixtures/agents/`
-substitute for the real `agy` so the E2E test can run without Docker
-or a Google credential.
+```markdown
+# PRD: Título de la tarea
 
-The S5 suite is the only one that requires `node` to be on `PATH` and
-`python3` to be available (the irresoluble mock uses a small Python
-one-liner to replace the `multiply` body — `bash` + `sed` was not
-expressive enough for the regex).
+## Task
+
+Descripción clara del problema a resolver.
+
+## Validation
+
+TEST_CMD: npm test
+```
+
+El loop extrae `TEST_CMD:` del PRD para saber qué comando ejecutar como validación. Si el PRD no especifica `TEST_CMD`, el loop intenta detectar el stack automáticamente (`package.json` → `npm test`, `go.mod` → `go test ./...`, etc.).
+
+### Ejecutar el loop
+
+```bash
+./ralph_runner.sh
+```
+
+El loop:
+
+1. Lee `PRD.md` y extrae `TEST_CMD`
+2. Inyecta el PRD + historial de intentos (`progress.log`) en agy
+3. agy modifica el código dentro del contenedor Docker
+4. Ejecuta el comando de validación
+5. Si pasa → **commit automático** a branch `ralph/issue-{id}-{slug}` y merge a la rama base
+6. Si falla → escribe el error en `progress.log`, espera 15s, y lo intenta de nuevo
+7. **Circuit breaker**: máximo 10 iteraciones. Si se agotan, preserva `progress.log` y termina con error.
+
+### Configuración
+
+Todo es configurable vía variables de entorno o archivo `.env`:
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `MAX_ITERATIONS` | `10` | Máximo de iteraciones por tarea |
+| `COOLDOWN_SECONDS` | `15` | Segundos entre iteraciones |
+| `IMAGE_NAME` | `ralph-loop-base` | Nombre de la imagen Docker |
+| `DOCKERFILE` | `.sandcastle/Dockerfile` | Path al Dockerfile |
+| `PRD_FILE` | `PRD.md` | Path al PRD de la tarea |
+| `MODEL` | *(lo que tenga agy configurado)* | Modelo Gemini a usar |
+
+### Proyecto de prueba
+
+```bash
+# Ir al proyecto de prueba
+cd test/fixtures/sample-bug-project
+
+# Copiar el PRD a la raíz
+cp PRD.md ../../PRD.md
+
+# Ejecutar el loop desde la raíz del repo
+cd ../..
+./ralph_runner.sh
+```
+
+## Estructura del proyecto
+
+```
+Ralph-loop-agy/
+├── ralph_runner.sh          ← Orquestador principal (Bash)
+├── ralph-worker.md          ← Skill de agy
+├── PRD.md                   ← Tarea actual (input)
+├── progress.log             ← Historial de iteraciones (se crea automáticamente)
+├── .env                     ← Configuración (opcional, ignorado por git)
+├── .sandcastle/
+│   └── Dockerfile           ← Imagen base (Alpine + agy + gh + git)
+└── test/fixtures/
+    ├── sample-bug-project/  ← Proyecto de ejemplo con bug real
+    ├── e2e-harness.sh       ← Harness de tests E2E
+    └── agents/              ← Mocks para tests
+```
+
+## Flujo de trabajo con Sandcastle
+
+Este repo incluye también [Sandcastle](https://github.com/ai-hero/sandcastle) para planificar y orquestar múltiples issues en paralelo. Para usarlo:
+
+```bash
+npm run sandcastle
+```
+
+Crea issues con label `Sandcastle` en GitHub y el orquestador los planifica, implementa, revisa y mergea automáticamente.
+
+## Safety
+
+- Las credenciales de agy (`~/.config/antigravity-cli`) se montan en **solo lectura** dentro del contenedor
+- El código del proyecto se monta en **lectura/escritura** para que agy pueda modificarlo
+- El contenedor está aislado: no afecta al sistema host
+- `progress.log` está en `.gitignore` — nunca se sube al repo
+
+## Licencia
+
+MIT
