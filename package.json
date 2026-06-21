@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "sandcastle": "npx tsx .sandcastle/main.mts",
-    "test:smoke": "bash .sandcastle/smoke-test.sh"
+    "test:smoke": "bash .sandcastle/smoke-test.sh",
+    "test:skill": "bash .sandcastle/skill-test.sh",
+    "test": "npm run test:smoke && npm run test:skill"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "latest",
