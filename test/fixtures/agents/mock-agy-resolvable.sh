@@ -19,13 +19,10 @@ target="src/calc.js"
 
 case "$iter" in
   1)
-    # Correct fix: replace `a + b` with `a * b` inside the multiply body.
-    sed -i 's|^function multiply(a, b) {$|function multiply(a, b) {|' "$target"
     sed -i '0,/return a + b;/{s|return a + b;|return a * b;|}' "$target"
     printf 'mock-agy-resolvable: applied correct fix on iter %s\n' "$iter" >&2
     ;;
   *)
-    # No-op after iteration 1.
     printf 'mock-agy-resolvable: no-op on iter %s (fix already in place)\n' "$iter" >&2
     ;;
 esac
