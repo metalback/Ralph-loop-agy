@@ -5,7 +5,8 @@
   "description": "Implementación del bucle Ralph con Google ADK TUI",
   "type": "module",
   "scripts": {
-    "sandcastle": "npx tsx .sandcastle/main.mts"
+    "sandcastle": "npx tsx .sandcastle/main.mts",
+    "test:smoke": "bash .sandcastle/smoke-test.sh"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "latest",

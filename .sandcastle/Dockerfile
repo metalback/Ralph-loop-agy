@@ -1,40 +1,53 @@
-FROM node:22-bookworm
+# Ralph Loop base image.
+#
+# Minimal sandbox for the antigravity-cli (agy) agent that the Ralph Loop
+# orchestrator drives from the host. Sized for ~350MB (vs ~2.4GB for the
+# previous bookworm + opencode-ai image).
+#
+# Build:
+#   docker build -t ralph-loop-base .sandcastle/Dockerfile
+#   # or via sandcastle:
+#   sandcastle docker build-image
+#
+# The image ships with: agy v1.0.8, gh CLI, git, jq, curl, bash.
+# Host credentials for agy must be mounted read-only at runtime:
+#   -v ~/.config/antigravity-cli:/home/agent/.config/antigravity-cli:ro
+# See .sandcastle/smoke-test.sh for the full acceptance-criteria check.
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-  git \
-  curl \
-  jq \
-  && rm -rf /var/lib/apt/lists/*
+FROM node:22-alpine
 
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-  && apt-get update && apt-get install -y gh \
-  && rm -rf /var/lib/apt/lists/*
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+# System packages. github-cli comes from the Alpine community repo, so we
+# append it to the repositories list before running apk.
+RUN set -eux \
+  && echo "https://dl-cdn.alpinelinux.org/alpine/v$(cat /etc/alpine-release | cut -d. -f1-2)/community" >> /etc/apk/repositories \
+  && apk add --no-cache \
+       bash \
+       curl \
+       git \
+       github-cli \
+       jq \
+  && rm -rf /var/cache/apk/*
 
-# Install OpenCode CLI
-RUN npm install -g opencode-ai@latest
+# agy v1.0.8 — the agent engine for the Ralph Loop.
+RUN npm install -g agy@1.0.8 \
+  && npm cache clean --force
 
-# Install bun (for faster JS tooling) and TypeScript
-RUN npm install -g bun typescript tsx
+# Rename the base image's "node" user/group to "agent" and align UID/GID
+# with the host user that drives the loop. Renaming avoids clashing with
+# any future host user named "node" and gives the credential-mount path a
+# stable owner.
+RUN set -eux \
+  && groupmod -g "$AGENT_GID" -n agent node \
+  && usermod  -u "$AGENT_UID" -g "$AGENT_GID" -d /home/agent -m -l agent node
 
-USER ${AGENT_UID}:${AGENT_GID}
-
+USER agent
 WORKDIR /home/agent
 
-# Force English git output so Sandcastle's worktree fallback logic works
+# Force English git output so future shell tooling can rely on it.
 ENV LC_ALL=C
 
+# Smoke entrypoint: keep the container alive so docker exec works against it.
 ENTRYPOINT ["sleep", "infinity"]
